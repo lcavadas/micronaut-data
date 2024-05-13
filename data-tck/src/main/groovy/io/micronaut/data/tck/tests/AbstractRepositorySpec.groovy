@@ -25,6 +25,7 @@ import io.micronaut.data.repository.jpa.criteria.DeleteSpecification
 import io.micronaut.data.repository.jpa.criteria.PredicateSpecification
 import io.micronaut.data.repository.jpa.criteria.QuerySpecification
 import io.micronaut.data.repository.jpa.criteria.UpdateSpecification
+import io.micronaut.data.tck.TestSqlExecutionObserver
 import io.micronaut.data.tck.entities.Author
 import io.micronaut.data.tck.entities.AuthorBooksDto
 import io.micronaut.data.tck.entities.AuthorDtoWithBookDtos
@@ -61,27 +62,16 @@ import jakarta.persistence.criteria.CriteriaUpdate
 import jakarta.persistence.criteria.Predicate
 import jakarta.persistence.criteria.Root
 import reactor.core.publisher.Mono
-import spock.lang.AutoCleanup
-import spock.lang.IgnoreIf
-import spock.lang.Shared
-import spock.lang.Specification
-import spock.lang.Unroll
+import spock.lang.*
 
 import java.sql.Connection
 import java.time.LocalDate
 import java.time.ZoneId
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.stream.Collectors
 
-import static io.micronaut.data.tck.repositories.BookSpecifications.hasChapter
-import static io.micronaut.data.tck.repositories.BookSpecifications.titleEquals
-import static io.micronaut.data.tck.repositories.BookSpecifications.titleEqualsWithJoin
-import static io.micronaut.data.tck.repositories.PersonRepository.Specifications.distinct
-import static io.micronaut.data.tck.repositories.PersonRepository.Specifications.idsIn
-import static io.micronaut.data.tck.repositories.PersonRepository.Specifications.nameEquals
-import static io.micronaut.data.tck.repositories.PersonRepository.Specifications.setIncome
-import static io.micronaut.data.tck.repositories.PersonRepository.Specifications.setName
+import static io.micronaut.data.tck.repositories.BookSpecifications.*
+import static io.micronaut.data.tck.repositories.PersonRepository.Specifications.*
 
 abstract class AbstractRepositorySpec extends Specification {
 
@@ -118,6 +108,9 @@ abstract class AbstractRepositorySpec extends Specification {
 
     @Shared
     Optional<SynchronousTransactionManager<Connection>> transactionManager = context.findBean(SynchronousTransactionManager)
+
+    @Shared
+    TestSqlExecutionObserver observer = context.getBean(TestSqlExecutionObserver)
 
     ApplicationContext getApplicationContext() {
         return context
@@ -2813,6 +2806,99 @@ abstract class AbstractRepositorySpec extends Specification {
 
          cleanup:
          entityWithIdClass2Repository.deleteAll()
+    }
+
+    void "observer receives inserts"() {
+        given:
+        observer.clear()
+
+        when:
+        bookRepository.save(new Book(title: "Anonymous", totalPages: 400))
+
+        then:
+        observer.invocations.size() == 1
+        observer.invocations.get(0).query =~ /(?i)insert\s+into\s+.*/
+        observer.invocations.get(0).parameters[3] == "Anonymous"
+        observer.invocations.get(0).parameters[4] == 400
+
+        cleanup:
+        cleanupData()
+    }
+
+    void "observer receives query"() {
+        given:
+        observer.clear()
+
+        when:
+        bookRepository.findById(1)
+
+        then:
+        observer.invocations.size() == 1
+        observer.invocations.get(0).query =~ /(?i)select\s+.*\s+from\s+.book.\s+.*/
+        observer.invocations.get(0).parameters == [1: 1]
+
+
+        cleanup:
+        cleanupData()
+    }
+
+    void "observer receives update"() {
+        given:
+        setupBooks()
+        def book = bookRepository.findAllByTitleStartingWith("Along Came a Spider").first()
+        def author = authorRepository.searchByName("Stephen King")
+        observer.clear()
+
+        when:
+        bookRepository.updateAuthor(book.id, author)
+
+        then:
+        observer.invocations.size() == 1
+        observer.invocations[0].query =~ /(?i)update\s+.book.\s+.*/
+        observer.invocations[0].parameters[1] == author.id
+        observer.invocations[0].parameters[3] == book.id
+        observer.invocations[0].affected == 1
+
+        cleanup:
+        cleanupData()
+    }
+
+    void "observer receives delete"() {
+        given:
+        setupBooks()
+        def book = bookRepository.findAllByTitleStartingWith("Along Came a Spider").first()
+        observer.clear()
+
+        when:
+        bookRepository.delete(book)
+
+        then:
+        observer.invocations.size() == 1
+        observer.invocations[0].query =~ /(?i)delete\s+from\s+.book.\s+.*/
+        observer.invocations[0].parameters == [1: book.id]
+
+        cleanup:
+        cleanupData()
+    }
+
+    void "observer receives @Query"(){
+      given:
+      saveSampleBooks()
+      observer.clear()
+
+      when:
+      def book = bookDtoRepository.findByTitleWithQuery("The Stand")
+
+      then:
+      book.isPresent()
+      book.get().title == "The Stand"
+
+      observer.invocations.size() == 1
+      observer.invocations[0].query =~ /select \* from book b where b.title = .*/
+      observer.invocations[0].parameters == [1: "The Stand"]
+
+      cleanup:
+      cleanupData()
     }
 
     private GregorianCalendar getYearMonthDay(Date dateCreated) {
